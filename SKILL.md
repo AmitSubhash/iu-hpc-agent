@@ -59,6 +59,7 @@ guess at partition limits, billing weights, or scheduler behavior -- the verifie
 19. [Ready-to-Use Templates](#19-ready-to-use-templates)
 20. [On-Cluster Verification Commands](#20-on-cluster-verification-commands)
 21. [Practical Workflow Recipes](#21-practical-workflow-recipes) **<-- START HERE**
+22. [Non-Obvious Tricks and Unique Connections](#22-non-obvious-tricks-and-unique-connections)
 
 ---
 
@@ -133,7 +134,7 @@ guess at partition limits, billing weights, or scheduler behavior -- the verifie
 | **L3 cache** | 16 MB/CCX (256 MB total per socket), ~17 ns same-CCX, ~35-40 ns cross-CCX |
 | **DRAM latency** | ~120-140 ns local NUMA, ~190-220 ns remote NUMA |
 | NUMA distance | 10 (local), 12 (remote) -- verified via `numactl --hardware` |
-| Memory per NUMA node | ~64 GB (4 NUMA nodes x 64 GB = 256 GB) |
+| Memory per NUMA node | ~32 GB on compute (8 NUMA x 32 GB = 256 GB); ~64 GB on login (4 NUMA x 64 GB) |
 
 **Key insight:** L3 is per-CCX (16 MB), NOT shared across the whole socket. 4 cores share
 16 MB of L3. Cross-CCX access within the same NUMA node is 2x slower than same-CCX.
@@ -346,12 +347,12 @@ mkdir -p "$LOGS" "$REPOS" "$DATA" "$CKPT" "$ENVS"
 
 | Partition | Node Type | Cores/Node | RAM | GPUs | Time Limit | Nodes | Use |
 |-----------|-----------|------------|-----|------|------------|-------|-----|
-| `general` | CPU | 128 | 256 GB | -- | **4 days** | 640 | CPU batch, preprocessing |
-| `debug` | CPU | 128 | 256 GB | -- | 1 hour | subset | Quick CPU debugging |
-| `interactive` | CPU | 128 | 256 GB | -- | ~4 hours | subset | Interactive CPU sessions |
-| `gpu` | GPU | 64 | 256 GB | 4x A100 | **2 days** | 64 | Main training jobs |
-| `gpu-debug` | GPU | 64 | 256 GB | 4x A100 | 1 hour | subset | Quick GPU debugging |
-| `gpu-interactive` | GPU | 64 | 256 GB | 4x A100 | 4 hours | subset | Jupyter, profiling |
+| `general` | CPU | 128 | 250 GB usable | -- | **4 days** | 638 | CPU batch, preprocessing |
+| `debug` | CPU | 128 | 250 GB usable | -- | 1 hour | 2 | Quick CPU debugging |
+| `interactive` | CPU | 128 | 250 GB usable | -- | ~4 hours | subset | Interactive CPU sessions |
+| `gpu` | GPU | 64 | **500 GB usable** | 4x A100 | **2 days** | 62 | Main training jobs |
+| `gpu-debug` | GPU | 64 | **500 GB usable** | 4x A100 | 1 hour | 2 | Quick GPU debugging |
+| `gpu-interactive` | GPU | 64 | **500 GB usable** | 4x A100 | 4 hours | 2 (shared w/ debug) | Jupyter, profiling |
 
 ### 6.2 Quartz
 
@@ -608,7 +609,7 @@ sacctmgr show assoc where user=atsubhas format=Account,Share,GrpTRESMins,MaxTRES
 | File format conversion (HDF5, NIfTI, DICOM) | I/O-bound, trivially parallelizable | Job arrays, 1-4 cores each |
 | Feature extraction (scikit-learn, scipy) | Multi-threaded via OpenBLAS/MKL | Set `OMP_NUM_THREADS` = `--cpus-per-task` |
 | Monte Carlo simulations (non-GPU MCX) | Embarrassingly parallel across seeds | Job arrays, one seed per task |
-| Memory-intensive processing (>256 GB) | BR200 nodes only have 256 GB | **Use Quartz** (512-768 GB nodes) |
+| Memory-intensive CPU work (>250 GB) | CPU nodes have 250 GB usable | **Use Quartz** (512 GB CPU nodes) or **BR200 GPU nodes** (500 GB usable, but costs GPU billing) |
 
 ### 9.2 When GPUs Win (Use `gpu` Partition)
 
@@ -851,7 +852,7 @@ python train.py --lr "$LR" --batch-size "$BS" --run-id "$SLURM_ARRAY_TASK_ID"
 
 **Pattern: Data processing across files**
 ```bash
-#SBATCH --array=0-999%50
+#SBATCH --array=0-499%50       # MaxArraySize=500 on BR200!
 #SBATCH -p general
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
@@ -1143,7 +1144,7 @@ echo "Chain submitted: 8 segments"
 
 ## 13. Storage and I/O Optimization
 
-### 13.1 Stage Data to Local SSD
+### 13.1 Stage Data to Node-Local tmpfs (RAM-Backed, NOT SSD)
 
 ```bash
 # Copy medium datasets to node-local storage at job start
@@ -1394,7 +1395,8 @@ lfs quota -hu atsubhas /N/scratch/    # Scratch
 #SBATCH -N 1
 #SBATCH --gres=gpu:4
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=200G
+#SBATCH --hint=nomultithread
+#SBATCH --mem=400G                    # GPU nodes have 500 GB usable!
 #SBATCH -t 12:00:00
 #SBATCH --signal=B:USR1@300
 #SBATCH -o %x-%j.out
@@ -1569,7 +1571,7 @@ echo "Submitting pipeline for project: $PROJECT"
 JOB1=$(sbatch --parsable \
     -J "${PROJECT}_preproc" \
     -A r00602 -p general \
-    --cpus-per-task=64 --mem=256G -t 12:00:00 \
+    --cpus-per-task=64 --mem=200G -t 12:00:00 \
     -o "${LOGDIR}/preproc-%j.out" \
     preprocess.sh)
 echo "  Preprocess: $JOB1"
@@ -1715,45 +1717,34 @@ Copy this into every new job script and adjust only what you need:
 #============================================================
 # SMART DEFAULTS -- Adjust the USER SETTINGS block only
 #============================================================
-# --- USER SETTINGS (change these) ---
-JOB_NAME="my_job"
-PARTITION="general"           # general | gpu | gpu-debug | debug
-TIME="04:00:00"              # HH:MM:SS (max: general=4d, gpu=2d)
-CPUS=64                      # physical cores (1-128 CPU, 1-64 GPU)
-MEM="128G"                   # explicit memory (NOT --mem=0)
-GPUS=0                       # 0-4 (only for gpu partitions)
-CONDA_ENV="myenv"            # conda env name or path
-
-# --- SBATCH HEADER (auto-generated) ---
-#SBATCH -J ${JOB_NAME}
+# --- CHANGE THESE 6 LINES, THEN SUBMIT ---
+#SBATCH -J my_job
 #SBATCH -A r00602
-#SBATCH -p ${PARTITION}
+#SBATCH -p general                    # general | gpu | gpu-debug | debug
 #SBATCH -N 1
-#SBATCH --cpus-per-task=${CPUS}
-#SBATCH --mem=${MEM}
-#SBATCH -t ${TIME}
-#SBATCH --hint=nomultithread
-#SBATCH --signal=B:USR1@300
+#SBATCH --cpus-per-task=64            # physical cores (1-128 CPU, 1-64 GPU)
+#SBATCH --mem=128G                    # explicit! (CPU: max 250G, GPU: max 500G)
+#SBATCH -t 04:00:00                   # max: general=4d, gpu=2d
+#SBATCH --hint=nomultithread          # physical cores only (always for scientific compute)
+#SBATCH --signal=B:USR1@300           # checkpoint 5 min before walltime
 #SBATCH -o logs/%x-%j.out
 #SBATCH -e logs/%x-%j.err
-# GPU line (comment out for CPU jobs):
-# #SBATCH --gres=gpu:${GPUS}
+## Uncomment for GPU jobs:
+## #SBATCH --gres=gpu:4
 
 set -euo pipefail
 mkdir -p logs
 
 # --- MODULES ---
 module purge
-if [ "${GPUS}" -gt 0 ]; then
-    module load cudatoolkit/12.6 2>/dev/null || true
-    module load nccl/2.27.7-1 2>/dev/null || true
-fi
+# Uncomment for GPU jobs:
+# module load cudatoolkit/12.6 2>/dev/null || true
+# module load nccl/2.27.7-1 2>/dev/null || true
 
 # --- ENVIRONMENT ---
-conda activate /N/slate/atsubhas/envs/${CONDA_ENV} 2>/dev/null \
-    || conda activate ${CONDA_ENV}
+conda activate /N/slate/atsubhas/envs/myenv
 
-# --- THREAD CONTROL (prevents oversubscription) ---
+# --- THREAD CONTROL (prevents BLAS oversubscription) ---
 export OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export OPENBLAS_NUM_THREADS=${SLURM_CPUS_PER_TASK}
 export MKL_NUM_THREADS=${SLURM_CPUS_PER_TASK}
@@ -1761,11 +1752,11 @@ export MKL_DEBUG_CPU_TYPE=5
 export OMP_PROC_BIND=close
 export OMP_PLACES=cores
 
-# For embarrassingly parallel (many processes, each single-thread):
+# For embarrassingly parallel (many single-threaded processes):
 # export OMP_NUM_THREADS=1 && export OPENBLAS_NUM_THREADS=1
 
 # --- PROJECT LAYOUT ---
-export PROJ="/N/slate/atsubhas/${JOB_NAME}"
+export PROJ="/N/slate/atsubhas/my_project"
 mkdir -p "${PROJ}/logs" "${PROJ}/checkpoints" "${PROJ}/data"
 
 # ============================================================
@@ -2028,6 +2019,195 @@ echo "  MaxRSS < 50% of ReqMem? --> Request less memory next time"
 echo "  Elapsed < 50% of TimeLimit? --> Request less time (better backfill)"
 echo "  GPU job with GPU util < 30%? --> Consider CPU instead"
 ```
+
+---
+
+## 22. Non-Obvious Tricks and Unique Connections
+
+### 22.1 SLURM Email Notifications
+
+Get notified when jobs finish without polling `squeue`:
+```bash
+#SBATCH --mail-type=END,FAIL,TIME_LIMIT_80    # notify on end, fail, or 80% walltime
+#SBATCH --mail-user=atsubhas@iu.edu
+```
+`TIME_LIMIT_80` is gold -- gives you a heads-up to check if the job needs more time before it dies.
+
+### 22.2 scrontab: SLURM's Cron (Recurring Jobs)
+
+Run periodic jobs without external cron. Useful for monitoring, data syncing, or periodic checkpoints:
+```bash
+# Edit your SLURM crontab
+scrontab -e
+
+# Example: check disk usage every 6 hours
+0 */6 * * * -A r00602 -p general --mem=1G -t 00:05:00 ~/bin/check_quotas.sh
+
+# Example: sync results to SDA tape archive every night
+0 2 * * * -A r00602 -p general --mem=4G -t 01:00:00 ~/bin/archive_results.sh
+```
+
+### 22.3 SSH Config for Fast Connections
+
+Add to `~/.ssh/config` on your Mac:
+```
+Host br200
+    HostName bigred200.uits.iu.edu
+    User atsubhas
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 4h
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+    ForwardAgent yes
+
+Host quartz
+    HostName quartz.uits.iu.edu
+    User atsubhas
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 4h
+```
+```bash
+mkdir -p ~/.ssh/sockets
+```
+`ControlMaster` multiplexes connections -- first SSH takes 2s, subsequent ones are instant. `ControlPersist 4h` keeps the tunnel alive for 4 hours after you disconnect.
+
+### 22.4 Globus for Large Data Transfers
+
+`scp` maxes out at ~100 MB/s. Globus uses parallel streams and can hit 1+ GB/s:
+```bash
+# IU endpoints (pre-configured):
+# - "Indiana University BigRed200" for /N/slate/, /N/scratch/
+# - "Indiana University Quartz" for Quartz storage
+# - Your laptop: install Globus Connect Personal
+
+# Transfer 500 GB dataset: use web UI at app.globus.org
+# or CLI:
+pip install globus-cli
+globus login
+globus transfer SOURCE_ENDPOINT:/path/ DEST_ENDPOINT:/path/ --recursive
+```
+Use Globus when moving >10 GB between systems or to/from external collaborators.
+
+### 22.5 GPU Nodes for Memory-Heavy CPU Work (Billing Hack)
+
+GPU nodes have **512 GB RAM** vs CPU nodes' 256 GB. If you need >250 GB for CPU work:
+```bash
+# Option A: Quartz (512 GB, no GPU billing) -- preferred
+#SBATCH -p general --mem=480G
+
+# Option B: BR200 GPU node (512 GB, but 16 billing units per GPU even if unused)
+#SBATCH -p gpu --gres=gpu:0 --mem=480G    # request 0 GPUs but still get 512 GB node
+# WARNING: --gres=gpu:0 may not work on all SLURM configs. Test first.
+# Alternative: request 1 GPU + use only CPU. Costs 16 extra billing units.
+```
+
+### 22.6 tmux on Login Node (Survive Disconnects)
+
+```bash
+# Start named session on BR200 login node
+ssh br200
+tmux new -s work
+
+# Inside tmux: submit jobs, run squeue, edit code
+# Detach: Ctrl+B, then D
+# Reconnect later:
+ssh br200
+tmux attach -t work
+
+# Your session survives WiFi drops, laptop sleep, everything.
+```
+
+### 22.7 Cross-Cluster Data: BR200 and Quartz Share Storage
+
+Home (`/N/u/atsubhas/`) and Slate (`/N/slate/atsubhas/`) are the **same filesystem** on both BR200 and Quartz. This means:
+- Preprocess on Quartz (512 GB RAM), train on BR200 (A100 GPUs) -- **no data copy needed**
+- Conda envs on Slate work on both clusters
+- Scratch (`/N/scratch/`) may differ -- verify before assuming
+
+### 22.8 Hybrid Quartz+BR200 Pipeline
+
+The shared storage enables true cross-cluster pipelines:
+```bash
+# Stage 1: Preprocess on Quartz (needs 400 GB RAM)
+ssh quartz
+sbatch --parsable -p general --mem=480G preprocess.sh > /N/slate/atsubhas/project/.job1_id
+
+# Stage 2: Train on BR200 (needs A100 GPUs) -- poll for Quartz job completion
+ssh br200
+cat > wait_and_train.sh << 'EOF'
+#!/bin/bash
+QUARTZ_JOB=$(cat /N/slate/atsubhas/project/.job1_id)
+# Check if output exists (Quartz job wrote it)
+while [ ! -f /N/slate/atsubhas/project/data/preprocessed_done.flag ]; do
+    sleep 60
+done
+sbatch train_gpu.sh
+EOF
+bash wait_and_train.sh
+```
+
+### 22.9 Remote Development from Claude Code
+
+You can have Claude write and submit jobs directly via SSH:
+```bash
+# From your Mac, Claude can:
+ssh br200 "sbatch /N/slate/atsubhas/project/train.sh"
+ssh br200 "squeue -u atsubhas"
+ssh br200 "cat /N/slate/atsubhas/project/logs/train-12345.out | tail -50"
+
+# Or edit files remotely:
+ssh br200 "cat > /N/slate/atsubhas/project/train.sh << 'EOF'
+#!/bin/bash
+#SBATCH -J train ...
+...
+EOF"
+```
+The SSH alias `br200` + ControlMaster makes this fast. Claude already used this in this session to verify cluster data.
+
+### 22.10 Job Efficiency Dashboard
+
+Bookmark this on your browser -- shows your historical usage and efficiency:
+```
+https://one.iu.edu/task/iu/hpc-user-dashboard
+```
+
+### 22.11 DOT/MCX-Specific: Photon Budget vs GPU Count
+
+For Monte Carlo photon transport (MCX), the key insight is **photons are embarrassingly parallel**:
+- 1 A100 runs ~1e9 photons/sec
+- 4 A100s on one node = ~4e9 photons/sec (linear scaling, NVLink not needed)
+- For large meshes that need >40 GB GPU RAM: split mesh across GPUs or use MIG
+
+But preprocessing (mesh generation, source placement) is **CPU-bound and memory-hungry**:
+- Use `general` partition with 64+ cores for iso2mesh/MATLAB meshing
+- For neonatal head models with fine resolution: may need >250 GB RAM -> use Quartz
+
+**Optimal DOT pipeline resource mapping:**
+
+| Stage | Partition | Resources | Why |
+|-------|-----------|-----------|-----|
+| Mesh generation (iso2mesh) | Quartz `general` | 128 cores, 480 GB | Memory-hungry, CPU-bound |
+| Source/detector placement | BR200 `general` | 16 cores, 32 GB | Light compute |
+| MCX forward simulation | BR200 `gpu` | 4x A100, 16 cores | GPU-native, linear scaling |
+| Jacobian computation | BR200 `gpu` | 1-4 A100 | Per-source, parallelizable |
+| Image reconstruction | BR200 `general` | 64 cores, 200 GB | Large matrix solve (BLAS-heavy) |
+| Statistical analysis | BR200 `general` | 16 cores, 64 GB | Light compute |
+
+### 22.12 The "Free Lunch" Optimization Checklist
+
+Before any HPC run, check these -- they cost zero extra effort but can double performance:
+
+- [ ] `--hint=nomultithread` in every SBATCH (5-20% for scientific compute)
+- [ ] `OMP_NUM_THREADS` matches `--cpus-per-task` (prevents 2-5x oversubscription)
+- [ ] `--time` is tight (1.5x measured, not max walltime -- better backfill)
+- [ ] `--mem` is explicit (not `--mem=0` -- avoids locking unused RAM)
+- [ ] `float32` instead of `float64` where precision allows (2x memory BW)
+- [ ] `MKL_DEBUG_CPU_TYPE=5` if using MKL on AMD (prevents Intel throttling)
+- [ ] Data on Slate, not Home (Lustre parallel I/O vs NFS)
+- [ ] Conda envs on Slate (prevents Home quota death)
+- [ ] `module purge` at script start (prevents stale module conflicts)
 
 ---
 
