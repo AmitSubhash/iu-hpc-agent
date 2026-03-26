@@ -1,200 +1,99 @@
-# IU HPC Agent
+# IU HPC Agent Skill
 
-A comprehensive, verified reference for Indiana University's High-Performance Computing infrastructure -- designed to be consumed by AI coding agents (Claude Code, Copilot, Cursor, etc.) so they can write correct SLURM jobs, optimize resource usage, and build multi-stage HPC pipelines without guessing.
+A Claude Code skill that turns AI into an expert assistant for Indiana University's Big Red 200 and Quartz HPC systems. Verified against on-cluster data (March 2026).
 
-## What This Is
+## What It Does
 
-A single, dense Markdown file (`SKILL.md`) containing **everything** an AI agent (or human) needs to know to effectively use IU's Big Red 200 supercomputer, Quartz cluster, and supporting infrastructure. Every number in this document was either verified by SSHing into the cluster and running `scontrol`/`sinfo`/`sacctmgr`, or sourced from official IU documentation.
+When a user asks anything about IU's HPC systems, Claude reads the relevant skill files and provides accurate, actionable answers with copy-paste commands and templates. No more digging through scattered KB articles.
 
-**2,000+ lines. 70 KB. 21 sections. All verified on-cluster 2026-03-19.**
+**Example interactions:**
+- "I need to train a 7B parameter model" -- estimates GPU memory, walltime, fair-share cost, and generates a ready-to-submit SBATCH script
+- "My job failed with OOM" -- walks through the diagnostic flowchart (host vs GPU OOM, exit codes, fixes)
+- "How do I get started on Big Red 200?" -- provides the full onboarding path: access, SSH, conda, first job
+- "I have 10,000 files to process" -- recommends job arrays with the right partition, throttling, and thread settings
 
-## Why This Exists
+## Architecture
 
-HPC documentation is scattered across KB articles, man pages, and tribal knowledge. When you ask an AI to "write me a SLURM job," it guesses -- wrong partition limits, wrong memory defaults, wrong billing weights. This file eliminates guessing.
-
-Drop `SKILL.md` into your AI agent's context and it will:
-- Know that GPU nodes have **512 GB RAM** (not 256 GB as widely documented)
-- Know that 1 GPU costs **16x** more than 1 CPU core in fair-share billing
-- Know the exact scheduler config (backfill every 5 min, 4-day fair-share decay, max 500 array tasks)
-- Write NUMA-aware jobs for the dual-socket EPYC 7742 (8 NUMA nodes, not 4)
-- Generate correct `--hint=nomultithread` + thread control for scientific Python
-- Build dependency-chained pipelines (preprocess on CPU -> train on GPU -> evaluate)
-
-## IU HPC Infrastructure at a Glance
-
-### Big Red 200 (Primary Supercomputer)
-
-| Spec | Value |
-|------|-------|
-| Architecture | HPE Cray EX (Shasta) -- first production Cray Shasta worldwide |
-| Peak Performance | ~7 PFLOPS |
-| CPU Nodes | 640 (2x AMD EPYC 7742, 128 cores, 256 GB DDR4) |
-| GPU Nodes | 66 (1x AMD EPYC 7713, 64 cores, **512 GB DDR4**, 4x NVIDIA A100-SXM4-40GB) |
-| Total GPUs | 264x A100-40GB with NVLink 3.0 full mesh (NV4) |
-| Total CPU Cores | 86,144 |
-| Interconnect | HPE Slingshot-10, 200 Gbps, Dragonfly topology, <1.8 us latency |
-| Storage | Lustre (Slate 800 GB, Scratch 100 TB), Home 100 GB, SDA tape archive |
-| Scheduler | SLURM 24.05.4, backfill with fair-share priority |
-| OS | SUSE Linux Enterprise Server 15 SP6 |
-
-### GPU Node Details (Verified on Cluster)
-
-| Spec | Value |
-|------|-------|
-| GPU | NVIDIA A100-SXM4-40GB |
-| GPU Memory BW | ~1,350 GB/s measured |
-| NVLink P2P BW | 93.5 GB/s unidirectional (93% theoretical) |
-| NVLink P2P Latency | ~2.2 us |
-| Host RAM | **512 GB** (500 GB usable) |
-| Compute Node /tmp | 126 GB RAM-backed tmpfs |
-| FP16/BF16 | 624 TFLOPS per GPU |
-| FP8 | Via MS-AMP (O1/O2/O3) |
-
-### CPU Node Details (AMD EPYC 7742 Rome)
-
-| Spec | Value |
-|------|-------|
-| Sockets | 2 per compute node |
-| Cores | 128 physical (256 with SMT) |
-| NUMA Nodes | **8 per compute node** (16 cores, ~32 GB each) |
-| L3 Cache | 16 MB per CCX (not shared across CCXs!) |
-| Memory BW | ~170-185 GB/s per socket (STREAM Triad) |
-| ISA | AVX2 + FMA (NO AVX-512) |
-| Compiler Target | `-march=znver2 -mtune=znver2` |
-
-### Quartz (High-Throughput Cluster)
-
-| Spec | Value |
-|------|-------|
-| CPU Nodes | 92 (2x EPYC 7742, 128 cores, **512 GB** RAM) |
-| GPU Nodes | 22 (V100-32GB) + 12 (H100) |
-| Best For | Memory-hungry CPU work (512-768 GB/node), high-throughput independent tasks |
-
-### SLURM Partitions
-
-| Partition | Nodes | GPUs | Time Limit | Default QOS Max Nodes |
-|-----------|-------|------|------------|-----------------------|
-| `general` | 638 | -- | 4 days | 200 |
-| `gpu` | 62 | 4x A100 | 2 days | 36 |
-| `gpu-debug` | 2 | 4x A100 | 1 hour | 2 |
-| `gpu-interactive` | 2 | 4x A100 | 4 hours | 1 |
-| `debug` | 2 | -- | 1 hour | 2 |
-
-### TRES Billing Weights
-
-| Partition | CPU Weight | Memory Weight | GPU Weight |
-|-----------|-----------|---------------|-----------|
-| CPU (`general`) | 1.0 per core | 0.512 per GB | -- |
-| GPU (`gpu`) | 1.0 per core | 0.128 per GB | **16.0 per GPU** |
-
-1 GPU = 16 CPU cores in fair-share cost. Under-utilizing GPUs burns your priority.
-
-### Scheduler Configuration
-
-| Parameter | Value |
-|-----------|-------|
-| Backfill Interval | 300s (5 min) |
-| Backfill Window | 7 days |
-| Priority Decay Half-Life | **4 days** |
-| Priority Max Age | 12 hours |
-| Age/FairShare/QOS Weights | Equal (100000 each) |
-| Max Array Size | **500** |
-
-## What's in SKILL.md
-
-| Section | What It Covers |
-|---------|---------------|
-| **How to Use** | Lookup table -- "I need to X" -> go to section Y |
-| **Architecture** | Full hardware specs for BR200 + Quartz, verified node topology |
-| **NUMA/CPU Deep Dive** | 8-NUMA dual-socket layout, cache hierarchy, memory bandwidth |
-| **Network** | Slingshot-10 specs, NCCL config, bandwidth hierarchy |
-| **Storage** | All 5 tiers with quotas, purge policies, symlink tricks |
-| **Partitions + QOS** | Every partition, QOS limit, billing weight, scheduler param |
-| **Software** | All module versions (Python 3.10-3.13, CUDA 11.4-12.6, cuDNN, NCCL, Apptainer) |
-| **Allocations** | IU's open-access model, RT Projects, ACCESS/Jetstream2 |
-| **CPU vs GPU** | Decision framework with concrete examples |
-| **CPU Optimization** | SMT, NUMA binding, BLAS threading, compiler flags, MKL-on-AMD fix |
-| **SLURM Optimization** | Job arrays, backfill exploitation, dependency chains, right-sizing |
-| **GPU Optimization** | DDP/FSDP decision tree, mixed precision, PyTorch checklist |
-| **Checkpointing** | Signal handling, auto-resubmission, robust save/load |
-| **Storage I/O** | tmpfs staging, Lustre striping, small-file pathology fixes |
-| **Environment** | Conda on Slate, Apptainer containers, module stacking |
-| **Common Pitfalls** | OOM, NCCL errors, quota exhaustion -- with fixes |
-| **Jetstream2 + ACCESS** | Cloud VMs, SU rates, allocation tiers |
-| **Templates** | 8 copy-paste SBATCH templates for common scenarios |
-| **Workflow Recipes** | Decision flowchart, brain imaging pipeline, ML training with auto-retry, mass parallel processing, post-job analysis |
-
-## Key Discoveries (Things the Official Docs Get Wrong)
-
-| What's Documented | What's Actually True |
-|---|---|
-| GPU nodes have 256 GB RAM | **512 GB RAM** (verified via `scontrol show node`) |
-| Login node NUMA = compute node NUMA | Compute nodes are **dual-socket with 8 NUMA nodes** (login is single-socket with 4) |
-| No local fast storage | `/tmp` is **126 GB RAM-backed tmpfs** on compute nodes |
-| Default job time is reasonable | **1 hour if you forget `--time`** (gpu-interactive: 30 min) |
-| MaxArraySize is 1001 | **500** on BR200 |
-| GPU billing is proportional | 1 GPU = **16x** the billing of 1 CPU core |
-
-## How to Use
-
-### For AI Agents (Claude Code, Cursor, etc.)
-
-Drop `SKILL.md` into your agent's skill/rules directory:
-
-```bash
-# Claude Code
-cp SKILL.md ~/.claude/skills/iu-hpc/SKILL.md
-
-# Or include in any project's .cursor/rules/, .github/copilot/, etc.
+```
+SKILL.md (89 lines)          <-- Always loaded. Routes to the right file.
+  |
+  +-- 00-quickstart.md        New user onboarding (access, SSH, conda, first job)
+  +-- 01-hardware.md          BR200 + Quartz specs, GPU topology, network
+  +-- 02-slurm.md             Partitions, billing, QOS, scheduler, backfill
+  +-- 03-gpu-optimization.md  DDP, FSDP, mixed precision, checkpointing, NCCL
+  +-- 04-cpu-optimization.md  NUMA topology, SMT, BLAS threading, compiler flags
+  +-- 05-storage-envs.md      Storage tiers, I/O tuning, conda, modules, containers
+  +-- 06-templates.md         10 copy-paste SBATCH templates
+  +-- 07-recipes-tips.md      Workflows, data transfer, tips, efficiency checklist
+  +-- 08-access-support.md    Allocations, ACCESS, Jetstream2, training, support
+  +-- 09-resource-estimator.md GPU memory formulas, walltime, sizing cheat sheet
+  +-- 10-troubleshooting.md   Diagnostic flowcharts for every failure mode
 ```
 
-### For Humans
+**Token-efficient by design:** Claude loads only the 89-line router by default, then reads 1-2 topic files on demand. A typical query uses ~250 lines of context instead of dumping 2000+.
 
-Read `SKILL.md` directly. Start with the "How to Use This Skill" lookup table at the top, then jump to the section you need.
+## What's Covered
 
-### On Big Red 200
+| Category | Highlights |
+|----------|-----------|
+| **Hardware** | BR200 (640 CPU + 66 GPU nodes, A100-40GB, NVLink mesh), Quartz (92 CPU + 22 V100 + 12 H100 nodes) |
+| **SLURM** | All partitions, billing weights (1 GPU = 16x CPU), QOS limits, scheduler config, backfill strategies |
+| **GPU Training** | DDP/FSDP decision tree, multi-node launch, BF16, activation checkpointing, gradient accumulation, PyTorch checklist |
+| **CPU Optimization** | Zen 2 NUMA topology (8 nodes/compute), SMT guidance, BLAS thread control, MKL-on-AMD fix, compiler flags |
+| **Storage** | 5 tiers (Home/Slate/Scratch/SDA/Geode-Project), Lustre tuning, local tmpfs staging, small-file avoidance, Globus endpoints |
+| **Templates** | GPU training, CPU preprocessing, HP sweep arrays, multi-node distributed, interactive, Jupyter, pipeline submission, memory-intensive |
+| **Resource Estimation** | GPU memory formulas (16B/param FP32), model size tables (10M to 70B), walltime benchmarks, fair-share cost calculator |
+| **Troubleshooting** | Exit code decoder, OOM (host + GPU), PENDING diagnosis, NCCL errors, filesystem issues, CUDA mismatches, low GPU utilization |
+| **Onboarding** | 7-step quickstart from zero to running GPU job, common first-day mistakes, Research Desktop (RED) GUI option |
+| **Access & Training** | RT Projects, ACCESS allocations, Jetstream2, 6+ training courses, Wednesday office hours |
+
+## Installation
+
+Copy the skill directory into your Claude Code skills path:
 
 ```bash
-# Copy to your home directory for reference
-scp SKILL.md br200:~/hpc-reference.md
+# For a single user
+cp -r iu-hpc/ ~/.claude/skills/iu-hpc/
+
+# Or clone the repo
+git clone https://github.com/AmitSubhash/iu-hpc-agent.git ~/.claude/skills/iu-hpc/
 ```
 
-## Quick Start: Your First Optimized Job
+## Setup
+
+Add 3 lines to your `~/.bashrc` on BR200/Quartz:
 
 ```bash
-#!/bin/bash
-#SBATCH -J my_job
-#SBATCH -A r00602
-#SBATCH -p general
-#SBATCH --cpus-per-task=64
-#SBATCH --hint=nomultithread
-#SBATCH --mem=128G
-#SBATCH -t 04:00:00
-#SBATCH -o logs/%x-%j.out
+export SLURM_ACCOUNT="your_account_id"   # from projects.rt.iu.edu
+export PROJ="/N/slate/$USER/your_project"
+export ENVS="/N/slate/$USER/envs"
+```
 
-set -euo pipefail
-mkdir -p logs
-module purge
+All templates use `<account>` for SBATCH `-A` and `$USER` for paths. Replace as needed.
 
-# Thread control (prevents BLAS oversubscription)
-export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export OPENBLAS_NUM_THREADS=$SLURM_CPUS_PER_TASK
-export MKL_DEBUG_CPU_TYPE=5  # Fix MKL on AMD
+## Verification
 
-conda activate /N/slate/$USER/envs/myenv
-python my_script.py
+All hardware specs, SLURM configuration, and billing weights were verified by SSHing into BR200 compute nodes (March 2026). To re-verify:
+
+```bash
+ssh br200
+sinfo -o "%20P %10a %10l %6D %8c %10m %G"         # partitions
+sacctmgr show qos format=Name,Priority,MaxWall      # QOS
+scontrol show config | grep -E "Priority|Backfill"   # scheduler
 ```
 
 ## Contributing
 
-If you have verified data from other IU systems (Quartz GPU node specs, Jetstream2 benchmarks), open a PR. All data must be verified on-cluster -- no guessing.
+- Hardware data should be verified on-cluster before updating
+- Templates must include `set -euo pipefail`, explicit `--mem`, `module purge`, and thread control vars
+- Keep each file under 300 lines
+- No hardcoded usernames, account IDs, or personal paths -- use `$USER` and `<account>`
 
-## License
+## Sources
 
-MIT. Use freely.
-
-## Acknowledgments
-
-- Indiana University Research Technologies
-- IU Knowledge Base (kb.iu.edu)
-- Verified hardware data from on-cluster benchmarks
+- [About Big Red 200](https://kb.iu.edu/d/brcc) | [About Quartz](https://servicenow.iu.edu/kb?id=kb_article_view&sysparm_article=KB0023985)
+- [Run GPU Jobs](https://kb.iu.edu/d/avjk) | [SLURM at IU](https://kb.iu.edu/d/awrz)
+- [Slate Storage](https://kb.iu.edu/d/aqnk) | [Home Quotas](https://kb.iu.edu/d/bhrl)
+- [ACCESS Allocations](https://allocations.access-ci.org/) | [Jetstream2](https://docs.jetstream-cloud.org/)
+- [RT Projects](https://projects.rt.iu.edu/) | [IT Training](https://ittraining.iu.edu)
+- [IU Globus](https://globus.iu.edu/) | [Research Data Commons](https://researchdata.iu.edu)
